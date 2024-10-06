@@ -32,22 +32,13 @@ help()
   echo "c     Clean up all the containers/volumes after run. 0: No clean up 2: Clean up e.g) -c 1"
 }
 
-SHORT=h:,o:,b:,t:,s:,e:,c:
-LONG=help:,outdir:,build:,trace:,scarab:,experiment:,cleanup:
-OPTS=$(getopt -a -n run.sh --options $SHORT --longoptions $LONG -- "$@")
-
-VALID_ARGUMENTS=$# # Returns the count of arguments that are in short or long options
-
-if [ "$VALID_ARGUMENTS" -eq 0 ]; then
+if [ $# -eq 0 ]; then
   help
   exit 0
 fi
 
-eval set -- "$OPTS"
-
 # Get the options
-while [[ $# -gt 0 ]];
-do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     -h | --help) # display help
       help
@@ -77,11 +68,7 @@ do
       CLEANUP=$2
       shift 2
       ;;
-    --)
-      shift 2
-      break
-      ;;
-    *) # unexpected option
+    *)
       echo "Unexpected option: $1"
       exit 1
       ;;
@@ -93,22 +80,31 @@ if [ ! -n "$OUTDIR" ]; then
   exit 1
 fi
 
-mkdir -p $OUTDIR
+# Convert to absolute path
+OUTDIR=$(realpath "$OUTDIR")
+mkdir -p "$OUTDIR"
+
+# Copy SSH key if it exists
+if [ -f ~/.ssh/nancyjlau ]; then
+  cp ~/.ssh/nancyjlau "$OUTDIR"
+else
+  echo "SSH key nancyjlau not found, skipping..."
+fi
 
 source utilities.sh
 
 # build docker images and start containers
 echo "build docker images and start containers.."
 taskPids=()
-start=`date +%s`
-while read APPNAME ;do
+start=$(date +%s)
+while read -r APPNAME; do
   source setup_apps.sh
 
-  if [ $BUILD ]; then
+  if [ -n "$BUILD" ]; then
     source build_apps.sh
   fi
 
-  if [ $SIMPOINT ]; then
+  if [ -n "$SIMPOINT" ]; then
     if [ "$APPNAME" == "allbench" ]; then
       echo "allbench is only for trace-based simulations with the traces from UCSC NFS"
       exit 1
@@ -118,114 +114,113 @@ while read APPNAME ;do
 
     # tokenize multiple environment variables
     ENVVARS=""
-    echo $ENVVARS
-    for token in $ENVVAR;
-    do
-       ENVVARS+=" -e ";
-       ENVVARS+=$token;
+    echo "$ENVVARS"
+    for token in $ENVVAR; do
+       ENVVARS+=" -e "
+       ENVVARS+="$token"
     done
 
     # update the script
-    docker cp ./run_simpoint_trace.sh $APP_GROUPNAME\_$USER:/usr/local/bin
-    docker exec $ENVVARS --user $USER --workdir /home/$USER --privileged $APP_GROUPNAME\_$USER run_simpoint_trace.sh "$APPNAME" "$APP_GROUPNAME" "$BINCMD" "$SIMPOINT" "$DRIO_ARGS" &
+    docker cp ./run_simpoint_trace.sh "${APP_GROUPNAME}_${USER}":/usr/local/bin
+    docker exec $ENVVARS --user "$USER" --workdir "/home/$USER" --privileged "${APP_GROUPNAME}_${USER}" run_simpoint_trace.sh "$APPNAME" "$APP_GROUPNAME" "$BINCMD" "$SIMPOINT" "$DRIO_ARGS" &
     sleep 2
-    while read -r line ;do
-      IFS=" " read PID CMD <<< $line
+    while read -r line; do
+      IFS=" " read -r PID CMD <<< "$line"
       if [ "$CMD" == "/bin/bash /usr/local/bin/run_simpoint_trace.sh $APPNAME $APP_GROUPNAME $BINCMD $SIMPOINT $DRIO_ARGS" ]; then
-        taskPids+=($PID)
+        taskPids+=("$PID")
       fi
-    done < <(docker top $APP_GROUPNAME\_$USER -eo pid,cmd)
+    done < <(docker top "${APP_GROUPNAME}_${USER}" -eo pid,cmd)
   fi
 done < apps.list
 
 wait_for_non_child "simpoint/tracing" "${taskPids[@]}"
-end=`date +%s`
+end=$(date +%s)
 report_time "post-processing" "$start" "$end"
 
-if [ $SCARABMODE ]; then
+if [ -n "$SCARABMODE" ]; then
   # run Scarab simulation
   echo "run Scarab simulation.."
   taskPids=()
-  start=`date +%s`
+  start=$(date +%s)
 
-  while read APPNAME; do
+  while read -r APPNAME; do
     source setup_apps.sh
     # update the script
-    docker cp ./run_exp_using_descriptor.py $APP_GROUPNAME\_$USER:/usr/local/bin
+    docker cp ./run_exp_using_descriptor.py "${APP_GROUPNAME}_${USER}":/usr/local/bin
     if [ "$APP_GROUPNAME" == "allbench_traces" ]; then
-      cp ${EXPERIMENT}.json $OUTDIR
-      docker exec --user $USER --workdir /home/$USER --privileged $APP_GROUPNAME\_$USER python3 /usr/local/bin/run_exp_using_descriptor.py -d $EXPERIMENT.json -a $APPNAME -g $APP_GROUPNAME -m $SCARABMODE &
+      cp "${EXPERIMENT}.json" "$OUTDIR"
+      docker exec --user "$USER" --workdir "/home/$USER" --privileged "${APP_GROUPNAME}_${USER}" python3 /usr/local/bin/run_exp_using_descriptor.py -d "$EXPERIMENT.json" -a "$APPNAME" -g "$APP_GROUPNAME" -m "$SCARABMODE" &
       while read -r line; do
-        IFS=" " read PID CMD <<< $line
+        IFS=" " read -r PID CMD <<< "$line"
         if [ "$CMD" == "python3 /usr/local/bin/run_exp_using_descriptor.py -d $EXPERIMENT.json -a $APPNAME -g $APP_GROUPNAME -m $SCARABMODE" ]; then
-          taskPids+=($PID)
+          taskPids+=("$PID")
         fi
-      done < <(docker top $APP_GROUPNAME\_$USER -eo pid,cmd)
+      done < <(docker top "${APP_GROUPNAME}_${USER}" -eo pid,cmd)
     elif [ "$APP_GROUPNAME" == "isca2024_udp" ] || [ "$APP_GROUPNAME" == "docker_traces" ]; then
-      cp ${APP_GROUPNAME}/${EXPERIMENT}.json $OUTDIR
-      docker exec --user $USER --workdir /home/$USER --privileged $APP_GROUPNAME\_$USER python3 /usr/local/bin/run_exp_using_descriptor.py -d $EXPERIMENT.json -a $APPNAME -g $APP_GROUPNAME -m $SCARABMODE &
+      cp "${APP_GROUPNAME}/${EXPERIMENT}.json" "$OUTDIR"
+      docker exec --user "$USER" --workdir "/home/$USER" --privileged "${APP_GROUPNAME}_${USER}" python3 /usr/local/bin/run_exp_using_descriptor.py -d "$EXPERIMENT.json" -a "$APPNAME" -g "$APP_GROUPNAME" -m "$SCARABMODE" &
       while read -r line; do
-        IFS=" " read PID CMD <<< $line
+        IFS=" " read -r PID CMD <<< "$line"
         if [ "$CMD" == "python3 /usr/local/bin/run_exp_using_descriptor.py -d $EXPERIMENT.json -a $APPNAME -g $APP_GROUPNAME -m $SCARABMODE" ]; then
-          taskPids+=($PID)
+          taskPids+=("$PID")
         fi
-      done < <(docker top $APP_GROUPNAME\_$USER -eo pid,cmd)
+      done < <(docker top "${APP_GROUPNAME}_${USER}" -eo pid,cmd)
     else
-      cp ${EXPERIMENT}.json $OUTDIR
-      docker exec --user $USER --workdir /home/$USER --privileged $APP_GROUPNAME\_$USER python3 /usr/local/bin/run_exp_using_descriptor.py -d $EXPERIMENT.json -a $APPNAME -g $APP_GROUPNAME -c $BINCMD -m $SCARABMODE &
+      cp "${EXPERIMENT}.json" "$OUTDIR"
+      docker exec --user "$USER" --workdir "/home/$USER" --privileged "${APP_GROUPNAME}_${USER}" python3 /usr/local/bin/run_exp_using_descriptor.py -d "$EXPERIMENT.json" -a "$APPNAME" -g "$APP_GROUPNAME" -c "$BINCMD" -m "$SCARABMODE" &
       while read -r line; do
-        IFS=" " read PID CMD <<< $line
+        IFS=" " read -r PID CMD <<< "$line"
         if [ "$CMD" == "python3 /usr/local/bin/run_exp_using_descriptor.py -d $EXPERIMENT.json -a $APPNAME -g $APP_GROUPNAME -c $BINCMD -m $SCARABMODE" ]; then
-          taskPids+=($PID)
+          taskPids+=("$PID")
         fi
-      done < <(docker top $APP_GROUPNAME\_$USER -eo pid,cmd)
+      done < <(docker top "${APP_GROUPNAME}_${USER}" -eo pid,cmd)
     fi
   done < apps.list
 
   wait_for_non_child "Scarab-simulation" "${taskPids[@]}"
-  end=`date +%s`
+  end=$(date +%s)
   report_time "Scarab-simulation" "$start" "$end"
 fi
 
-if [ $CLEANUP ]; then
+if [ -n "$CLEANUP" ]; then
   echo "clean up the containers.."
   # solr requires extra cleanup
   taskPids=()
-  start=`date +%s`
-  while read APPNAME ;do
+  start=$(date +%s)
+  while read -r APPNAME; do
     source setup_apps.sh
     case $APPNAME in
       solr)
         rmCmd="docker rm web_search_client"
-        eval $rmCmd &
+        eval "$rmCmd" &
         taskPids+=($!)
         sleep 2
         ;;
     esac
-    docker stop $APP_GROUPNAME\_$USER
-    rmCmd="docker rm $APP_GROUPNAME\_$USER"
-    eval $rmCmd &
+    docker stop "${APP_GROUPNAME}_${USER}"
+    rmCmd="docker rm ${APP_GROUPNAME}_${USER}"
+    eval "$rmCmd" &
     taskPids+=($!)
     sleep 2
   done < apps.list
 
   wait_for "container-cleanup" "${taskPids[@]}"
-  end=`date +%s`
+  end=$(date +%s)
   report_time "container-cleanup" "$start" "$end"
 
   echo "clean up the volumes.."
   # remove docker volume
   taskPids=()
-  start=`date +%s`
-  while read APPNAME ; do
+  start=$(date +%s)
+  while read -r APPNAME; do
     source setup_apps.sh
     rmCmd="docker volume rm $APP_GROUPNAME"
-    eval $rmCmd &
+    eval "$rmCmd" &
     taskPids+=($!)
     sleep 2
   done < apps.list
 
   wait_for "volume-cleanup" "${taskPids[@]}"
-  end=`date +%s`
+  end=$(date +%s)
   report_time "volume-cleanup" "$start" "$end"
 fi
